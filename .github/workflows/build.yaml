@@ -29,11 +29,6 @@ jobs:
   check:
     name: cargo check
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - stable
-          - nightly
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
@@ -41,7 +36,7 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
           override: true
 
       - name: Run cargo check
@@ -49,14 +44,9 @@ jobs:
         with:
           command: check
 
-  test:
-    name: cargo test
+  check-nightly:
+    name: cargo check nightly
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - stable
-          - nightly
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
@@ -64,9 +54,46 @@ jobs:
         uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: nightly
+          override: true
+
+      - name: Run cargo check nightly
+        continue-on-error: true
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
           override: true
       - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+  test-nightly:
+    name: cargo test nightly
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v2
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+      - name: Run cargo test nightly
+        continue-on-error: true
         uses: actions-rs/cargo@v1
         with:
           command: test
