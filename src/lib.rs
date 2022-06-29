@@ -18,9 +18,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use crate::data::astarte::Astarte;
+use crate::data::Publisher;
+use crate::ota::ota_handler::OTAHandler;
+use crate::telemetry::TelemetryPayload;
 use astarte_sdk::builder::AstarteOptions;
 use astarte_sdk::types::AstarteType;
-use astarte_sdk::{registration, Aggregation, AstarteSdk};
+use astarte_sdk::{registration, Aggregation};
 use device::DeviceProxy;
 use error::DeviceManagerError;
 use log::{debug, info, warn};
@@ -29,11 +33,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc::Sender;
-
-use crate::astarte::Astarte;
-use crate::data::astarte;
-use crate::ota::ota_handler::OTAHandler;
+use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::RwLock;
 
 mod commands;
 mod data;
@@ -59,10 +60,10 @@ pub struct DeviceManagerOptions {
 }
 
 pub struct DeviceManager {
-    sdk: AstarteSdk,
+    astarte_publisher: Astarte,
     //we pass the ota event through a channel, to avoid blocking the main loop
     ota_event_channel: Sender<HashMap<String, AstarteType>>,
-    telemetry: Arc<telemetry::Telemetry>,
+    telemetry: Arc<RwLock<telemetry::Telemetry>>,
 }
 
 impl DeviceManager {
@@ -89,7 +90,7 @@ impl DeviceManager {
             .ensure_pending_ota_response(&astarte_client)
             .await?;
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let (tx, mut rx) = channel(32);
 
         let astarte_client_clone = astarte_client.clone();
         tokio::spawn(async move {
@@ -101,25 +102,43 @@ impl DeviceManager {
             }
         });
 
-        let tel = telemetry::Telemetry::from_default_config(opts.telemetry_config).await;
+        let (telemetry_tx, mut telemetry_rx) = channel(32);
+        let astarte_client_telemetry_clone = astarte_client.clone();
+
+        let tel =
+            telemetry::Telemetry::from_default_config(opts.telemetry_config, telemetry_tx).await;
+        tokio::spawn(async move {
+            while let Some(msg) = telemetry_rx.recv().await {
+                match msg {
+                    TelemetryPayload::SystemStatus(data) => {
+                        let _ = astarte_client_telemetry_clone
+                            .send_object(
+                                "io.edgehog.devicemanager.SystemStatus",
+                                "/systemStatus",
+                                data,
+                            )
+                            .await;
+                    }
+                };
+            }
+        });
 
         Ok(Self {
-            sdk: device,
-            telemetry: Arc::new(tel),
+            astarte_publisher: astarte_client,
+            telemetry: Arc::new(RwLock::new(tel)),
             ota_event_channel: tx,
         })
     }
 
     pub async fn run(&mut self) {
         wrapper::systemd::systemd_notify_status("Running");
-        let w = self.sdk.clone();
-        let tel = self.telemetry.clone();
+        let tel_clone = self.telemetry.clone();
         tokio::task::spawn(async move {
-            tel.run_telemetry(w).await;
+            tel_clone.write().await.run_telemetry().await;
         });
 
         loop {
-            match self.sdk.poll().await {
+            match self.astarte_publisher.clone().device_sdk.poll().await {
                 Ok(clientbound) => {
                     debug!("incoming: {:?}", clientbound);
 
@@ -151,8 +170,11 @@ impl DeviceManager {
                             Aggregation::Individual(data),
                         ) => {
                             self.telemetry
-                                .telemetry_config_event(interface_name, endpoint, data)
+                                .clone()
+                                .write()
                                 .await
+                                .telemetry_config_event(interface_name, endpoint, data)
+                                .await;
                         }
 
                         _ => {
@@ -173,7 +195,7 @@ impl DeviceManager {
     }
 
     pub async fn send_initial_telemetry(&self) -> Result<(), DeviceManagerError> {
-        let device = &self.sdk;
+        let device = &self.astarte_publisher;
 
         let data = [
             (
@@ -192,7 +214,7 @@ impl DeviceManager {
 
         for (ifc, fields) in data {
             for (path, data) in fields {
-                device.send(ifc, &path, data).await?;
+                device.device_sdk.send(ifc, &path, data).await?;
             }
         }
 

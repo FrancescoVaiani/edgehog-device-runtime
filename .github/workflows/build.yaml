@@ -76,4 +76,4 @@ jobs:
         env:
           RUSTFLAGS: -Awarnings
         with:
-          command: test
+          command: test -- --test-threads 1
